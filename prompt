@@ -1,0 +1,5 @@
+I want to get started using TLDRAW here on my own machine. But I want to make sure we can both see and edit this whiteboard by building a file‑backed bridge.
+
+Keep it small (a Vite plugin and one sync file) and let us both read and write to a JSON file.
+
+NOTE: Poll on an interval rather than a store listener.
