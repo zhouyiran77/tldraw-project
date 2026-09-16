@@ -22,12 +22,20 @@ Do not request `GET /api/shapes`: that endpoint is reserved for the open editor 
 
 ## Add shapes
 
-Send one shape partial or an array of shape partials as JSON with `Content-Type: application/json`:
+Always send shapes through the `scripts/send-shapes.mjs` helper. It reads a JSON file with Node.js (native UTF-8) and posts via `fetch`, bypassing terminal encoding issues that corrupt non-ASCII text on Windows.
 
-```http
-POST <origin>/api/shapes
-Content-Type: application/json
+Steps:
 
+1. Write the JSON array to `tmp_shapes.json` in the project root using the Write tool.
+2. Send via the helper script:
+
+```bash
+node scripts/send-shapes.mjs <origin> tmp_shapes.json
+```
+
+Shape partial example (the file content):
+
+```json
 [
   {
     "type": "geo",
