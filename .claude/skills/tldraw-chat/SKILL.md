@@ -1,19 +1,62 @@
 ---
 name: tldraw-chat
-description: Start tldraw with file-backed sync for whiteboard collaboration between user and Claude. Use when user wants to chat on whiteboard, mentions drawing/canvas.
+description: Start and collaborate in the local tldraw whiteboard through its validated HTTP sync API. Use when the user wants to chat on a whiteboard, draw on the canvas, inspect the current drawing, or add tldraw shapes.
 ---
 
 # TLDraw Chat
 
-1. Check if dev server running (look for vite process or test port)
-2. If not running: `npm run dev` in background
-3. Wait 2 seconds, check output for URL
-4. Tell user the URL, confirm sync ready
-5. Keep response brief
+## Start the session
 
-## Collaboration
+1. Check whether the Vite development server is already running and capture its origin.
+2. If needed, run `npm run dev` in the background and read its output for the actual URL.
+3. Request `GET <origin>/api/drawing`. Treat a `200` response as ready; surface any validation error instead of changing the backing file.
+4. Give the user the browser URL and ask them to keep the page open while collaborating. The page consumes queued shapes and persists the editor-generated snapshot.
 
-- User draws in browser → syncs to `drawing.json`
-- Claude reads canvas: read `drawing.json`
-- Claude adds shapes: edit `drawing.json` with new shape objects
-- Use unique IDs like `shape:claude_<timestamp>`
+## Canvas boundary
+
+Treat `drawing.json` as application-owned state. Read the canvas through `GET <origin>/api/drawing` and send additions through `POST <origin>/api/shapes`; this keeps every write behind tldraw v5 schema validation.
+
+Do not write, patch, reformat, replace, or generate `drawing.json` with filesystem tools, scripts, redirection, or JSON processors. If an API request is rejected, correct the request instead of bypassing validation.
+
+Do not request `GET /api/shapes`: that endpoint is reserved for the open editor and drains the pending queue.
+
+## Add shapes
+
+Send one shape partial or an array of shape partials as JSON with `Content-Type: application/json`:
+
+```http
+POST <origin>/api/shapes
+Content-Type: application/json
+
+[
+  {
+    "type": "geo",
+    "x": 120,
+    "y": 80,
+    "props": {
+      "geo": "rectangle",
+      "w": 280,
+      "h": 120,
+      "align": "middle",
+      "verticalAlign": "middle",
+      "richText": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": "Hello" }]
+          }
+        ]
+      }
+    }
+  }
+]
+```
+
+Let the editor assign record IDs and fill default properties. For `geo` shapes, horizontal alignment is `align`; `textAlign` belongs to text shapes and is rejected on `geo` shapes.
+
+A successful request returns `200` with `{ "queued": <count> }`. Keep the browser page open, wait for its polling cycle, then verify the persisted result through `GET /api/drawing`.
+
+The shape API currently creates shapes only. For updates or deletions, use the browser editor when available or explain the limitation; never work around it by modifying `drawing.json`.
+
+Keep the user-facing response brief and report API validation failures clearly.
