@@ -1,11 +1,40 @@
 import type { Plugin } from 'vite'
 import fs from 'node:fs'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import path from 'node:path'
+import type { TLShapePartial } from 'tldraw'
+import {
+  InvalidTldrawPayloadError,
+  parseShapePartials,
+  parseTldrawSnapshot,
+} from './src/tldrawValidation.js'
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  return parsed
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.statusCode = status
+  res.setHeader('Content-Type', 'application/json')
+  res.end(JSON.stringify(payload))
+}
+
+function validationMessage(error: InvalidTldrawPayloadError | SyntaxError): string {
+  return error.message
+}
 
 export default function tldrawSync(): Plugin {
   let filePath: string
   let version = 0
-  let lastMtime = 0
+  let lastMtime: number | null = null
+  let cachedSnapshot: ReturnType<typeof parseTldrawSnapshot> | null = null
+  let cachedValidationError: string | null = null
+  const shapeQueue: TLShapePartial[] = []
 
   return {
     name: 'tldraw-sync',
@@ -13,49 +42,88 @@ export default function tldrawSync(): Plugin {
       filePath = path.resolve(config.root, 'drawing.json')
     },
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (req.url !== '/api/drawing') return next()
+      server.middlewares.use(async (req, res, next) => {
+        try {
+          if (req.url === '/api/drawing') {
+            if (req.method === 'GET') {
+              const mtime = fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : null
+              if (mtime !== lastMtime) {
+                lastMtime = mtime
+                cachedSnapshot = null
+                cachedValidationError = null
+                version++
+                try {
+                  if (mtime !== null) {
+                    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+                    cachedSnapshot = parseTldrawSnapshot(parsed)
+                  }
+                } catch (error) {
+                  if (
+                    error instanceof InvalidTldrawPayloadError ||
+                    error instanceof SyntaxError
+                  ) {
+                    cachedValidationError = validationMessage(error)
+                  } else {
+                    throw error
+                  }
+                }
+              }
 
-        if (req.method === 'GET') {
-          if (fs.existsSync(filePath)) {
-            const mtime = fs.statSync(filePath).mtimeMs
-            if (mtime !== lastMtime) {
-              lastMtime = mtime
+              if (cachedValidationError) {
+                sendJson(res, 422, { version, error: cachedValidationError })
+                return
+              }
+
+              sendJson(res, 200, { version, snapshot: cachedSnapshot })
+              return
+            }
+
+            if (req.method === 'PUT') {
+              const snapshot = parseTldrawSnapshot(await readJson(req))
+              fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf8')
+              lastMtime = fs.statSync(filePath).mtimeMs
+              cachedSnapshot = snapshot
+              cachedValidationError = null
               version++
+              sendJson(res, 200, { version })
+              return
             }
+
+            res.statusCode = 405
+            res.end()
+            return
           }
 
-          let snapshot = null
-          if (fs.existsSync(filePath)) {
-            try {
-              snapshot = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
-            } catch {
-              snapshot = null
+          if (req.url === '/api/shapes') {
+            if (req.method === 'GET') {
+              sendJson(res, 200, shapeQueue.splice(0))
+              return
             }
+
+            if (req.method === 'POST') {
+              const shapes = parseShapePartials(await readJson(req))
+              shapeQueue.push(...shapes)
+              sendJson(res, 200, { queued: shapes.length })
+              return
+            }
+
+            res.statusCode = 405
+            res.end()
+            return
           }
 
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ version, snapshot }))
-          return
+          next()
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            sendJson(res, 400, { error: validationMessage(error) })
+            return
+          }
+          if (error instanceof InvalidTldrawPayloadError) {
+            sendJson(res, 422, { error: validationMessage(error) })
+            return
+          }
+          next(error)
         }
-
-        if (req.method === 'PUT') {
-          const chunks: Buffer[] = []
-          req.on('data', (chunk: Buffer) => chunks.push(chunk))
-          req.on('end', () => {
-            const body = Buffer.concat(chunks).toString('utf-8')
-            const parsed = JSON.parse(body)
-            fs.writeFileSync(filePath, JSON.stringify(parsed, null, 2), 'utf-8')
-            lastMtime = fs.statSync(filePath).mtimeMs
-            version++
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ version }))
-          })
-          return
-        }
-
-        res.statusCode = 405
-        res.end()
       })
     },
   }
