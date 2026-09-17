@@ -5,4 +5,7 @@ import tldrawSync from './vite-plugin-tldraw-sync.ts'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tldrawSync()],
+  server: {
+    port: 3003,
+  },
 })
