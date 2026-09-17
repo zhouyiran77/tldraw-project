@@ -9,7 +9,27 @@ if (!file) {
   process.exit(1)
 }
 
-const body = readFileSync(file, 'utf8')
+// ProseMirror rejects text nodes with empty strings.
+// Strip them so callers don't need to worry about it.
+function sanitizeRichText(node) {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map(sanitizeRichText).filter(Boolean)
+  if (node.type === 'text' && node.text === '') return null
+  const result = { ...node }
+  if (Array.isArray(result.content)) {
+    result.content = result.content.map(sanitizeRichText).filter(Boolean)
+    if (result.content.length === 0) delete result.content
+  }
+  return result
+}
+
+function sanitizeShape(shape) {
+  if (!shape?.props?.richText) return shape
+  return { ...shape, props: { ...shape.props, richText: sanitizeRichText(shape.props.richText) } }
+}
+
+const shapes = JSON.parse(readFileSync(file, 'utf8'))
+const body = JSON.stringify(Array.isArray(shapes) ? shapes.map(sanitizeShape) : sanitizeShape(shapes))
 
 const res = await fetch(`${origin}/api/shapes`, {
   method: 'POST',
