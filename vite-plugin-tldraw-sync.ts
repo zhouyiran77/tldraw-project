@@ -54,8 +54,15 @@ export default function tldrawSync(): Plugin {
                 version++
                 try {
                   if (mtime !== null) {
-                    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-                    cachedSnapshot = parseTldrawSnapshot(parsed)
+                    const content = fs.readFileSync(filePath, 'utf8').trim()
+
+                    // Handle empty file or empty object - treat as no snapshot
+                    if (content === '' || content === '{}') {
+                      cachedSnapshot = null
+                    } else {
+                      const parsed: unknown = JSON.parse(content)
+                      cachedSnapshot = parseTldrawSnapshot(parsed)
+                    }
                   }
                 } catch (error) {
                   if (
