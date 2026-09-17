@@ -2,9 +2,13 @@ import {
   createTLStore,
   defaultBindingUtils,
   defaultShapeUtils,
-  getSnapshot,
+  DocumentRecordType,
   isShapeId,
+  PageRecordType,
+  TLDOCUMENT_ID,
+  ZERO_INDEX_KEY,
   loadSnapshot,
+  type TLRecord,
   type TLShapeId,
   type TLShapePartial,
 } from 'tldraw'
@@ -22,6 +26,22 @@ export type ShapeChanges = {
 }
 
 export type ShapesPostBody = ShapeChanges & { readonly clientId: string | null }
+
+export type TLDocumentRecord = Extract<
+  TLRecord,
+  { typeName: 'asset' | 'binding' | 'document' | 'page' | 'shape' | 'user' }
+>
+
+export type TLDocumentRecordId = TLDocumentRecord['id']
+
+export type DocumentRecordChanges = {
+  readonly records: TLDocumentRecord[]
+  readonly removedRecordIds: TLDocumentRecordId[]
+}
+
+export type RecordsPostBody = DocumentRecordChanges & {
+  readonly clientId: string | null
+}
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -48,6 +68,14 @@ function isSnapshotEnvelope(value: unknown): value is TldrawSnapshot {
 
 function isShapePartialEnvelope(value: unknown): value is TLShapePartial {
   return isRecord(value) && typeof value.type === 'string'
+}
+
+function isDocumentRecordEnvelope(value: unknown): value is TLDocumentRecord {
+  if (!isRecord(value) || typeof value.typeName !== 'string') return false
+  if (!['asset', 'binding', 'document', 'page', 'shape', 'user'].includes(value.typeName)) {
+    return false
+  }
+  return typeof value.id === 'string'
 }
 
 function errorDetail(error: unknown): string {
@@ -117,6 +145,32 @@ export function parseShapePartials(value: unknown): TLShapePartial[] {
   return candidates.map(parseShapePartial)
 }
 
+export function parseDocumentRecords(value: unknown): TLDocumentRecord[] {
+  if (!isUnknownArray(value)) {
+    throw new InvalidTldrawPayloadError('records must be an array of tldraw document records')
+  }
+
+  const records = value.map((candidate) => {
+    if (!isDocumentRecordEnvelope(candidate)) {
+      throw new InvalidTldrawPayloadError('Each record must be a complete document record with a supported typeName')
+    }
+    return candidate
+  })
+
+  const store = createTLStore({
+    shapeUtils: [...defaultShapeUtils],
+    bindingUtils: [...defaultBindingUtils],
+  })
+
+  try {
+    store.put(records as TLRecord[])
+  } catch (error) {
+    throw new InvalidTldrawPayloadError(errorDetail(error))
+  }
+
+  return records
+}
+
 function parseRemovedShapeIds(value: unknown): TLShapeId[] {
   if (value === undefined) return []
   if (!isUnknownArray(value)) {
@@ -128,6 +182,20 @@ function parseRemovedShapeIds(value: unknown): TLShapeId[] {
       throw new InvalidTldrawPayloadError('Each removed shape ID must start with "shape:"')
     }
     return id
+  })
+}
+
+function parseRemovedRecordIds(value: unknown): TLDocumentRecordId[] {
+  if (value === undefined) return []
+  if (!isUnknownArray(value)) {
+    throw new InvalidTldrawPayloadError('removedRecordIds must be an array of record IDs')
+  }
+
+  return value.map((id) => {
+    if (typeof id !== 'string' || !/^[^:\s]+:.+$/.test(id)) {
+      throw new InvalidTldrawPayloadError('Each removed record ID must contain a type prefix')
+    }
+    return id as TLDocumentRecordId
   })
 }
 
@@ -172,6 +240,19 @@ export function parseShapesPostBody(value: unknown): ShapesPostBody {
   }
 }
 
+export function parseRecordsPostBody(value: unknown): RecordsPostBody {
+  if (!isRecord(value)) {
+    throw new InvalidTldrawPayloadError('Expected an object with records')
+  }
+
+  const hasClientId = 'clientId' in value && value.clientId != null
+  return {
+    clientId: hasClientId ? parseClientId(value.clientId) : null,
+    records: parseDocumentRecords(value.records),
+    removedRecordIds: parseRemovedRecordIds(value.removedRecordIds),
+  }
+}
+
 export function parseSnapshotEvent(value: unknown): TldrawSnapshot | null {
   if (!isRecord(value) || !('snapshot' in value)) {
     throw new InvalidTldrawPayloadError('Invalid drawing-snapshot event payload')
@@ -189,10 +270,29 @@ export function parseShapesEvent(value: unknown): ShapeChanges {
   }
 }
 
+export function parseRecordsEvent(value: unknown): DocumentRecordChanges {
+  if (!isRecord(value) || !('records' in value)) {
+    throw new InvalidTldrawPayloadError('Invalid document-records event payload')
+  }
+
+  return {
+    records: parseDocumentRecords(value.records),
+    removedRecordIds: parseRemovedRecordIds(value.removedRecordIds),
+  }
+}
+
 export function createEmptySnapshot(): TldrawSnapshot {
   const store = createTLStore({
     shapeUtils: [...defaultShapeUtils],
     bindingUtils: [...defaultBindingUtils],
   })
-  return getSnapshot(store)
+  store.put([
+    DocumentRecordType.create({ id: TLDOCUMENT_ID }),
+    PageRecordType.create({
+      id: PageRecordType.createId('page'),
+      name: 'Page 1',
+      index: ZERO_INDEX_KEY,
+    }),
+  ])
+  return store.getStoreSnapshot()
 }

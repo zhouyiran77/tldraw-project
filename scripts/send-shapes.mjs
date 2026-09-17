@@ -28,8 +28,9 @@ function sanitizeShape(shape) {
   return { ...shape, props: { ...shape.props, richText: sanitizeRichText(shape.props.richText) } }
 }
 
-const shapes = JSON.parse(readFileSync(file, 'utf8'))
-const body = JSON.stringify(Array.isArray(shapes) ? shapes.map(sanitizeShape) : sanitizeShape(shapes))
+const raw = JSON.parse(readFileSync(file, 'utf8'))
+const shapes = Array.isArray(raw) ? raw.map(sanitizeShape) : [sanitizeShape(raw)]
+const body = JSON.stringify({ clientId: null, shapes, removedShapeIds: [] })
 
 const res = await fetch(`${origin}/api/shapes`, {
   method: 'POST',

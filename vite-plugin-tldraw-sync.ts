@@ -7,8 +7,10 @@ import {
   InvalidTldrawPayloadError,
   createEmptySnapshot,
   parseClientId,
+  parseRecordsPostBody,
   parseShapesPostBody,
   parseTldrawSnapshot,
+  type DocumentRecordChanges,
   type ShapeChanges,
   type TldrawSnapshot,
 } from './src/tldrawValidation.js'
@@ -26,6 +28,32 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify(payload))
+}
+
+export function mergeDocumentRecordChanges(
+  snapshot: TldrawSnapshot | null,
+  { records, removedRecordIds }: DocumentRecordChanges,
+): TldrawSnapshot {
+  const baseSnapshot = snapshot ?? createEmptySnapshot()
+  const store = { ...(baseSnapshot as Record<string, unknown>) }
+  const doc = store.document as Record<string, unknown> | undefined
+  const storeRecords = {
+    ...((doc?.store ?? store.store) as Record<string, unknown>),
+  }
+
+  for (const record of records) {
+    storeRecords[record.id] = record
+  }
+  for (const id of removedRecordIds) {
+    delete storeRecords[id]
+  }
+
+  if (doc) {
+    store.document = { ...doc, store: storeRecords }
+  } else {
+    store.store = storeRecords
+  }
+  return store as unknown as TldrawSnapshot
 }
 
 export default function tldrawSync(): Plugin {
@@ -170,6 +198,27 @@ export default function tldrawSync(): Plugin {
               )
               console.log(
                 `[tldraw-sse] broadcast ${shapes.length} shapes and ${removedShapeIds.length} removals from ${clientId ?? 'external'} to ${recipients} clients`,
+              )
+              sendJson(res, 200, { broadcast: recipients })
+              return
+            }
+
+            res.statusCode = 405
+            res.end()
+            return
+          }
+
+          if (url.pathname === '/api/records') {
+            if (req.method === 'POST') {
+              const { clientId, records, removedRecordIds } = parseRecordsPostBody(await readJson(req))
+              inMemorySnapshot = mergeDocumentRecordChanges(inMemorySnapshot, {
+                records,
+                removedRecordIds,
+              })
+              scheduleDiskWrite()
+              const recipients = broadcast('document-records', { records, removedRecordIds }, clientId ?? undefined)
+              console.log(
+                `[tldraw-sse] broadcast ${records.length} document records and ${removedRecordIds.length} removals from ${clientId ?? 'external'} to ${recipients} clients`,
               )
               sendJson(res, 200, { broadcast: recipients })
               return

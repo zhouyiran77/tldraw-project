@@ -4,12 +4,18 @@ import {
   type TLRecord,
   type TLShapeId,
   type TLShapePartial,
-  getSnapshot,
   loadSnapshot,
 } from 'tldraw'
-import { parseShapesEvent, parseSnapshotEvent } from './tldrawValidation'
+import {
+  parseRecordsEvent,
+  parseShapesEvent,
+  parseSnapshotEvent,
+  type DocumentRecordChanges,
+  type TLDocumentRecord,
+  type TLDocumentRecordId,
+} from './tldrawValidation'
 
-const SHAPE_BATCH_MS = 100
+const RECORD_BATCH_MS = 100
 
 const clientId = crypto.randomUUID()
 
@@ -61,11 +67,56 @@ export function applyRemoteShapes(
   })
 }
 
+function isDocumentRecord(record: TLRecord): record is TLDocumentRecord {
+  return (
+    record.typeName === 'asset' ||
+    record.typeName === 'binding' ||
+    record.typeName === 'document' ||
+    record.typeName === 'page' ||
+    record.typeName === 'shape' ||
+    record.typeName === 'user'
+  )
+}
+
+type DocumentChanges = {
+  readonly added: Record<string, TLRecord>
+  readonly updated: Record<string, readonly [TLRecord, TLRecord]>
+  readonly removed: Record<string, TLRecord>
+}
+
+export function collectDocumentChanges(changes: DocumentChanges): DocumentRecordChanges {
+  const records: TLDocumentRecord[] = []
+  const removedRecordIds: TLDocumentRecordId[] = []
+
+  for (const record of Object.values(changes.added)) {
+    if (isDocumentRecord(record)) records.push(record)
+  }
+  for (const [, record] of Object.values(changes.updated)) {
+    if (isDocumentRecord(record)) records.push(record)
+  }
+  for (const record of Object.values(changes.removed)) {
+    if (isDocumentRecord(record)) removedRecordIds.push(record.id)
+  }
+
+  return { records, removedRecordIds }
+}
+
+export function applyRemoteRecords(
+  editor: Editor,
+  records: readonly TLDocumentRecord[],
+  removedRecordIds: readonly TLDocumentRecordId[] = [],
+): void {
+  editor.store.mergeRemoteChanges(() => {
+    if (records.length > 0) editor.store.put([...records])
+    if (removedRecordIds.length > 0) editor.store.remove([...removedRecordIds])
+  })
+}
+
 export function useFileSync(editor: Editor | null) {
-  const shapeBusyRef = useRef(false)
-  const pendingShapesRef = useRef<TLRecord[]>([])
-  const pendingRemovedShapeIdsRef = useRef<TLShapeId[]>([])
-  const shapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recordBusyRef = useRef(false)
+  const pendingRecordsRef = useRef(new Map<string, TLDocumentRecord>())
+  const pendingRemovedRecordIdsRef = useRef(new Set<TLDocumentRecordId>())
+  const recordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (!editor) return
@@ -96,6 +147,17 @@ export function useFileSync(editor: Editor | null) {
       }
     })
 
+    source.addEventListener('document-records', (event) => {
+      try {
+        const { records, removedRecordIds } = parseRecordsEvent(JSON.parse(event.data) as unknown)
+        if (records.length === 0 && removedRecordIds.length === 0) return
+
+        applyRemoteRecords(editor, records, removedRecordIds)
+      } catch (error) {
+        logSyncError('document records event', error)
+      }
+    })
+
     source.onerror = () => console.warn('[sync] SSE connection lost, reconnecting')
 
     return () => source.close()
@@ -104,69 +166,63 @@ export function useFileSync(editor: Editor | null) {
   useEffect(() => {
     if (!editor) return
 
-    const flushShapes = async () => {
-      if (
-        pendingShapesRef.current.length === 0 &&
-        pendingRemovedShapeIdsRef.current.length === 0
-      ) {
+    const scheduleFlush = () => {
+      if (recordTimerRef.current !== null) {
+        clearTimeout(recordTimerRef.current)
+      }
+      recordTimerRef.current = setTimeout(() => {
+        void flushRecords()
+      }, RECORD_BATCH_MS)
+    }
+
+    const flushRecords = async () => {
+      if (pendingRecordsRef.current.size === 0 && pendingRemovedRecordIdsRef.current.size === 0) {
         return
       }
-      if (shapeBusyRef.current) return
+      if (recordBusyRef.current) return
 
-      shapeBusyRef.current = true
-      const shapesToSend = [...pendingShapesRef.current]
-      const removedShapeIdsToSend = [...pendingRemovedShapeIdsRef.current]
-      pendingShapesRef.current = []
-      pendingRemovedShapeIdsRef.current = []
+      recordBusyRef.current = true
+      const recordsToSend = [...pendingRecordsRef.current.values()]
+      const removedRecordIdsToSend = [...pendingRemovedRecordIdsRef.current]
+      pendingRecordsRef.current.clear()
+      pendingRemovedRecordIdsRef.current.clear()
 
       try {
-        const res = await fetch('/api/shapes', {
+        const res = await fetch('/api/records', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          keepalive: true,
           body: JSON.stringify({
             clientId,
-            shapes: shapesToSend,
-            removedShapeIds: removedShapeIdsToSend,
+            records: recordsToSend,
+            removedRecordIds: removedRecordIdsToSend,
           }),
         })
         await readJson(res)
       } catch (error) {
-        logSyncError('post shapes', error)
+        logSyncError('post document records', error)
       } finally {
-        shapeBusyRef.current = false
+        recordBusyRef.current = false
+        if (pendingRecordsRef.current.size > 0 || pendingRemovedRecordIdsRef.current.size > 0) {
+          scheduleFlush()
+        }
       }
     }
 
     const unsubscribe = editor.store.listen(
       (entry) => {
-        for (const record of Object.values(entry.changes.added)) {
-          if (record.typeName === 'shape') {
-            pendingShapesRef.current.push(record)
-          }
+        const { records, removedRecordIds } = collectDocumentChanges(entry.changes)
+        for (const record of records) {
+          pendingRecordsRef.current.set(record.id, record)
+          pendingRemovedRecordIdsRef.current.delete(record.id)
+        }
+        for (const id of removedRecordIds) {
+          pendingRecordsRef.current.delete(id)
+          pendingRemovedRecordIdsRef.current.add(id)
         }
 
-        for (const [_from, to] of Object.values(entry.changes.updated)) {
-          if (to.typeName === 'shape') {
-            pendingShapesRef.current.push(to)
-          }
-        }
-
-        for (const record of Object.values(entry.changes.removed)) {
-          if (record.typeName === 'shape') {
-            pendingRemovedShapeIdsRef.current.push(record.id)
-          }
-        }
-
-        if (
-          pendingShapesRef.current.length > 0 ||
-          pendingRemovedShapeIdsRef.current.length > 0
-        ) {
-          if (shapeTimerRef.current !== null) {
-            clearTimeout(shapeTimerRef.current)
-          }
-          shapeTimerRef.current = setTimeout(() => {
-            void flushShapes()
-          }, SHAPE_BATCH_MS)
+        if (records.length > 0 || removedRecordIds.length > 0) {
+          scheduleFlush()
         }
       },
       { scope: 'document', source: 'user' },
@@ -174,23 +230,25 @@ export function useFileSync(editor: Editor | null) {
 
     return () => {
       unsubscribe()
-      if (shapeTimerRef.current !== null) {
-        clearTimeout(shapeTimerRef.current)
+      if (recordTimerRef.current !== null) {
+        clearTimeout(recordTimerRef.current)
       }
     }
   }, [editor])
 
-  // beforeunload: flush full snapshot on page close as a safety net
   useEffect(() => {
     const onBeforeUnload = () => {
       if (!editor) return
 
       try {
-        const snapshot = getSnapshot(editor.store)
-        fetch('/api/drawing', {
-          method: 'PUT',
+        const records = [...pendingRecordsRef.current.values()]
+        const removedRecordIds = [...pendingRemovedRecordIdsRef.current]
+        if (records.length === 0 && removedRecordIds.length === 0) return
+
+        fetch('/api/records', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(snapshot),
+          body: JSON.stringify({ clientId, records, removedRecordIds }),
           keepalive: true,
         })
       } catch {

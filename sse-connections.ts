@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http'
 
-export type SseEventName = 'drawing-snapshot' | 'shapes-updated'
+export type SseEventName = 'document-records' | 'drawing-snapshot' | 'shapes-updated'
 
 const connections = new Map<string, ServerResponse>()
 const connectedAt = new Map<string, number>()

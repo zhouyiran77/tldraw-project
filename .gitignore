@@ -26,3 +26,4 @@ tmp_shapes.json
 *.sw?
 
 drawing.json
+.debug*
