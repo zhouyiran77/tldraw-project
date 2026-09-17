@@ -2,16 +2,28 @@ import {
   createTLStore,
   defaultBindingUtils,
   defaultShapeUtils,
+  getSnapshot,
+  isShapeId,
   loadSnapshot,
+  type TLShapeId,
   type TLShapePartial,
 } from 'tldraw'
 
-type TldrawSnapshot = Parameters<typeof loadSnapshot>[1]
+export type TldrawSnapshot = Parameters<typeof loadSnapshot>[1]
 
 export type DrawingResponse = {
   readonly version: number
   readonly snapshot: TldrawSnapshot | null
 }
+
+export type ShapeChanges = {
+  readonly shapes: TLShapePartial[]
+  readonly removedShapeIds: TLShapeId[]
+}
+
+export type ShapesPostBody = ShapeChanges & { readonly clientId: string | null }
+
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export class InvalidTldrawPayloadError extends Error {
   constructor(message: string) {
@@ -105,6 +117,20 @@ export function parseShapePartials(value: unknown): TLShapePartial[] {
   return candidates.map(parseShapePartial)
 }
 
+function parseRemovedShapeIds(value: unknown): TLShapeId[] {
+  if (value === undefined) return []
+  if (!isUnknownArray(value)) {
+    throw new InvalidTldrawPayloadError('removedShapeIds must be an array of shape IDs')
+  }
+
+  return value.map((id) => {
+    if (typeof id !== 'string' || !isShapeId(id)) {
+      throw new InvalidTldrawPayloadError('Each removed shape ID must start with "shape:"')
+    }
+    return id
+  })
+}
+
 export function parseDrawingResponse(value: unknown): DrawingResponse {
   if (!isRecord(value) || typeof value.version !== 'number' || !('snapshot' in value)) {
     throw new InvalidTldrawPayloadError('Invalid drawing API response')
@@ -121,4 +147,52 @@ export function parseVersionResponse(value: unknown): number {
     throw new InvalidTldrawPayloadError('Invalid drawing version response')
   }
   return value.version
+}
+
+export function parseClientId(value: unknown): string {
+  if (typeof value !== 'string' || !UUID_V4.test(value)) {
+    throw new InvalidTldrawPayloadError('clientId must be a UUID v4 string')
+  }
+  return value
+}
+
+export function parseShapesPostBody(value: unknown): ShapesPostBody {
+  if (!isRecord(value)) {
+    throw new InvalidTldrawPayloadError('Expected an object with shapes')
+  }
+  if (!isUnknownArray(value.shapes)) {
+    throw new InvalidTldrawPayloadError('shapes must be an array of shape partials')
+  }
+
+  const hasClientId = 'clientId' in value && value.clientId != null
+  return {
+    clientId: hasClientId ? parseClientId(value.clientId) : null,
+    shapes: parseShapePartials(value.shapes),
+    removedShapeIds: parseRemovedShapeIds(value.removedShapeIds),
+  }
+}
+
+export function parseSnapshotEvent(value: unknown): TldrawSnapshot | null {
+  if (!isRecord(value) || !('snapshot' in value)) {
+    throw new InvalidTldrawPayloadError('Invalid drawing-snapshot event payload')
+  }
+  return value.snapshot === null ? null : parseTldrawSnapshot(value.snapshot)
+}
+
+export function parseShapesEvent(value: unknown): ShapeChanges {
+  if (!isRecord(value) || !isUnknownArray(value.shapes)) {
+    throw new InvalidTldrawPayloadError('Invalid shapes-updated event payload')
+  }
+  return {
+    shapes: parseShapePartials(value.shapes),
+    removedShapeIds: parseRemovedShapeIds(value.removedShapeIds),
+  }
+}
+
+export function createEmptySnapshot(): TldrawSnapshot {
+  const store = createTLStore({
+    shapeUtils: [...defaultShapeUtils],
+    bindingUtils: [...defaultBindingUtils],
+  })
+  return getSnapshot(store)
 }

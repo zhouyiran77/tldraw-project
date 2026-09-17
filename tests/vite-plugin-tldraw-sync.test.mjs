@@ -146,28 +146,61 @@ test('refuses to serve a schema-invalid drawing file', async () => {
   }
 })
 
-test('rejects geo partials that use textAlign before queueing them', async () => {
+test('serves an externally edited drawing file on the next request', async () => {
   // Given
-  const fixture = await startServer(createValidSnapshot())
-  const invalidGeo = {
-    type: 'geo',
-    x: 0,
-    y: 0,
-    props: { geo: 'rectangle', w: 100, h: 100, textAlign: 'middle' },
+  const initialSnapshot = createValidSnapshot()
+  const fixture = await startServer(initialSnapshot)
+  const editedSnapshot = structuredClone(initialSnapshot)
+  const records = 'document' in editedSnapshot ? editedSnapshot.document.store : editedSnapshot.store
+  const geo = Object.values(records).find((record) => record?.typeName === 'shape')
+  assert.ok(geo)
+  geo.x = 42
+
+  try {
+    await writeFile(fixture.drawingPath, JSON.stringify(editedSnapshot, null, 2), 'utf8')
+
+    // When
+    const response = await fetch(`${fixture.baseUrl}/api/drawing`)
+    const body = await response.json()
+    const returnedRecords =
+      'document' in body.snapshot ? body.snapshot.document.store : body.snapshot.store
+
+    // Then
+    assert.equal(response.status, 200)
+    assert.equal(returnedRecords[geo.id].x, 42)
+  } finally {
+    await fixture.close()
   }
+})
+
+test('persists shape deletions from a full snapshot', async () => {
+  // Given
+  const initialSnapshot = createValidSnapshot()
+  const records =
+    'document' in initialSnapshot ? initialSnapshot.document.store : initialSnapshot.store
+  const shape = Object.values(records).find((record) => record?.typeName === 'shape')
+  assert.ok(shape)
+  const fixture = await startServer(initialSnapshot)
+  const updatedSnapshot = structuredClone(initialSnapshot)
+  const updatedRecords =
+    'document' in updatedSnapshot ? updatedSnapshot.document.store : updatedSnapshot.store
+  delete updatedRecords[shape.id]
 
   try {
     // When
-    const response = await fetch(`${fixture.baseUrl}/api/shapes`, {
-      method: 'POST',
+    const response = await fetch(`${fixture.baseUrl}/api/drawing`, {
+      method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(invalidGeo),
+      body: JSON.stringify(updatedSnapshot),
     })
-    const queued = await fetch(`${fixture.baseUrl}/api/shapes`)
+    const drawingResponse = await fetch(`${fixture.baseUrl}/api/drawing`)
+    const drawing = await drawingResponse.json()
+    const storedRecords =
+      'document' in drawing.snapshot ? drawing.snapshot.document.store : drawing.snapshot.store
 
     // Then
-    assert.equal(response.status, 422)
-    assert.deepEqual(await queued.json(), [])
+    assert.equal(response.status, 200)
+    assert.equal(shape.id in storedRecords, false)
   } finally {
     await fixture.close()
   }
