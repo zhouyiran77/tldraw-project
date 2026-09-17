@@ -63,7 +63,9 @@ export default function tldrawSync(): Plugin {
                     error instanceof SyntaxError
                   ) {
                     cachedValidationError = validationMessage(error)
+                    console.error('[tldraw-sync] Validation error:', cachedValidationError)
                   } else {
+                    console.error('[tldraw-sync] Unexpected error:', error)
                     throw error
                   }
                 }
